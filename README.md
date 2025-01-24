@@ -70,38 +70,3 @@ docker run -d waifu-bot
 
 ## License
 MIT
-
--------------------
-
-# .gitignore
-target/
-waifu_bot_data/
-.env
-*.log
-Cargo.lock
-
--------------------
-
-# Dockerfile
-FROM rust:1.75-slim
-
-WORKDIR /usr/src/waifu-bot
-COPY . .
-
-RUN cargo build --release
-
-CMD ["./target/release/waifu-bot"]
-
--------------------
-
-# start.sh
-#!/bin/bash
-
-if [ ! -f .env ]; then
-    echo "Error: .env file not found!"
-    echo "Please create a .env file with your Discord token"
-    exit 1
-fi
-
-export $(cat .env | xargs)
-cargo run --release
