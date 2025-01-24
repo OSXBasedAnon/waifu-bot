@@ -18,7 +18,7 @@ Discord bot for waifu character selection and profile management.
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/yourusername/waifu-bot
+git clone https://github.com/OSXBasedAnon/waifu-bot
 cd waifu-bot
 ```
 
