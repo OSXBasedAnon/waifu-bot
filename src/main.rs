@@ -24,7 +24,7 @@ use waifu::{add_waifu_to_embed, get_ssr_color, WaifuTier, PULL_COST};
 use hikari::{Hikari, HikariConfig, HikariHandler};
 use scanner::{HikariScanner, HikariScannerHandler};
 
-// Hikari
+// Bot struct
 struct Bot {
     store: Arc<Store>,
     hikari: Arc<RwLock<Hikari>>,
@@ -47,50 +47,51 @@ async fn respond_success(ctx: &Context, channel_id: ChannelId, success_message: 
 
 #[async_trait]
 impl EventHandler for Bot {
-    // Keep your existing ready implementation
-async fn ready(&self, ctx: Context, ready: Ready) {
-    println!("{} is connected!", ready.user.name);
+    async fn ready(&self, ctx: Context, ready: Ready) {
+        println!("{} is connected!", ready.user.name);
+        println!("Bot ID: {}", ready.user.id);
+        println!("Ready to handle DMs and messages!");
 
-    // Initialize the gacha system
-    match self.store.init_gacha_system().await {
-        Ok(_) => println!("Gacha system initialized successfully"),
-        Err(e) => println!("Error initializing gacha system: {:?}", e),
-    }
+        // Initialize the gacha system
+        match self.store.init_gacha_system().await {
+            Ok(_) => println!("Gacha system initialized successfully"),
+            Err(e) => println!("Error initializing gacha system: {:?}", e),
+        }
 
-    // Initialize scanner background tasks with proper context
-    {
-        let scanner = self.scanner.clone();
-        let ctx_arc = Arc::new(ctx.clone());
+        // Initialize scanner background tasks
+        {
+            let scanner = self.scanner.clone();
+            let ctx_arc = Arc::new(ctx.clone());
+            tokio::spawn(async move {
+                println!("Starting scanner background tasks");
+                scanner.start_background_tasks(ctx_arc).await;
+                println!("Scanner background tasks initialized");
+            });
+        }
+
+        // Set up scheduled tasks
+        let store_clone = Arc::clone(&self.store);
         tokio::spawn(async move {
-            println!("Starting scanner background tasks");
-            scanner.start_background_tasks(ctx_arc).await;
-            println!("Scanner background tasks initialized");
-        });
-    }
+            let mut interval = time::interval(Duration::from_secs(60 * 60 * 24)); // Once per day
+            loop {
+                interval.tick().await;
 
-    // Set up scheduled tasks
-    let store_clone = Arc::clone(&self.store);
-    tokio::spawn(async move {
-        let mut interval = time::interval(Duration::from_secs(60 * 60 * 24)); // Once per day
-        loop {
-            interval.tick().await;
+                // Create a daily backup
+                if let Err(e) = store_clone.backup_database().await {
+                    println!("Error creating daily backup: {:?}", e);
+                }
 
-            // Create a daily backup
-            if let Err(e) = store_clone.backup_database().await {
-                println!("Error creating daily backup: {:?}", e);
-            }
-
-            // Check if it's the first of the month for monthly rotation
-            let now = Utc::now();
-            if now.day() == 1 {
-                let config = store_clone.get_config().await;
-                if config.monthly_rotation {
-                    store_clone.reset_monthly_stats().await;
+                // Check if it's the first of the month for monthly rotation
+                let now = Utc::now();
+                if now.day() == 1 {
+                    let config = store_clone.get_config().await;
+                    if config.monthly_rotation {
+                        store_clone.reset_monthly_stats().await;
+                    }
                 }
             }
-        }
-    });
-}
+        });
+    }
 
     async fn guild_member_addition(&self, ctx: Context, mut member: Member) {
         println!(
@@ -109,7 +110,7 @@ async fn ready(&self, ctx: Context, ready: Ready) {
                 .map(|g| g.name)
                 .unwrap_or_else(|| "the server".to_string());
 
-            // Process welcome message with variable substitution (Carl bot style)
+            // Process welcome message with variable substitution
             let processed_message = config
                 .welcome_message
                 .replace("{user}", &member.mention().to_string())
@@ -154,9 +155,44 @@ async fn ready(&self, ctx: Context, ready: Ready) {
             return;
         }
 
-        // First check if scanner should handle this message
+        // Debug logging
+        println!("=== MESSAGE RECEIVED ===");
+        println!("Author: {} (ID: {})", msg.author.name, msg.author.id);
+        println!("Is DM: {}", msg.guild_id.is_none());
+        println!("Content: {}", msg.content);
+        println!("Channel ID: {}", msg.channel_id);
+
+        // HANDLE DMs FIRST - This is critical!
+        if msg.guild_id.is_none() {
+            println!("Processing DM from {}", msg.author.name);
+            
+            // Let Hikari handle ALL DMs
+            let hikari_handled = {
+                let mut hikari = self.hikari.write().await;
+                hikari.handle_message(ctx.clone(), msg.clone()).await
+            };
+            
+            if hikari_handled {
+                println!("Hikari handled the DM successfully");
+                return;
+            } else {
+                println!("Hikari failed to handle DM, sending fallback");
+                // Fallback DM response
+                let _ = msg.channel_id.send_message(&ctx.http, |m| {
+                    m.embed(|e| {
+                        e.title("Hey there! 💜")
+                            .description("I'm having a little trouble right now, but I'm still here! Try talking to me again or use !hikarihelp for commands!")
+                            .color(0x9B59B6)
+                    })
+                }).await;
+            }
+            return;
+        }
+
+        // For guild messages, check scanner first
         let scanner_handled = self.scanner.handle_scan_events(ctx.clone(), msg.clone()).await;
         if scanner_handled {
+            println!("Scanner handled the message");
             return;
         }
         
@@ -166,49 +202,17 @@ async fn ready(&self, ctx: Context, ready: Ready) {
             hikari.handle_message(ctx.clone(), msg.clone()).await
         };
         if hikari_handled {
+            println!("Hikari handled the guild message");
             return;
         }
 
-    println!(
-        "Processing message from {}: {}",
-        msg.author.name, msg.content
-    );
+        println!(
+            "Processing regular command from {}: {}",
+            msg.author.name, msg.content
+        );
 
-
-        // Check if this is a direct message (no guild_id)
-        if msg.guild_id.is_none() {
-            // This is a direct message
-            println!("Received DM from {}", msg.author.name);
-
-            // Send help information
-            let _ = msg.channel_id.send_message(&ctx.http, |m| {
-                m.embed(|e| {
-                    e.title("WaifuBot Help")
-                        .description("Thanks for messaging me! Here are the commands you can use in the server:")
-                        .field("Basic Commands", 
-                            "!profile - View your profile and points\n\
-                             !rankings - View character popularity rankings\n\
-                             !leaderboard - View points leaderboard", 
-                            false)
-                        .field("Gacha Commands", 
-                            "!diamonds - Check your diamond balance\n\
-                             !pull - Pull a random waifu (costs 💎 250)\n\
-                             !waifu - Display your favorite waifu\n\
-                             !collection - Show your entire waifu collection\n\
-                             !favorite [name] - Set a waifu as your favorite\n\
-                             !discard [name] - Discard one copy of a waifu\n\
-                             !daily - Check your daily free pulls", 
-                            false)
-                        .footer(|f| f.text("Use these commands in the server, not in DMs!"))
-                        .color(0x2ECC71)
-                })
-            }).await;
-
-            return;
-        }
-
-        if let Some(guild_id) = msg.guild_id {
-            // Track message for stats
+        // Track message for stats (only for guild messages)
+        if let Some(_guild_id) = msg.guild_id {
             self.store.track_message(msg.author.id.0).await;
 
             let config = self.store.get_config().await;
@@ -220,7 +224,7 @@ async fn ready(&self, ctx: Context, ready: Ready) {
                 return;
             }
 
-            // Admin commands check - only process in #waifbot-cmd channel
+            // Admin commands check - only process in #waifubot-cmd channel
             if msg.content.starts_with("!config") || msg.content.starts_with("!winner") {
                 // Get channel name
                 let channel_name = match msg.channel_id.to_channel(&ctx.http).await {
@@ -2032,7 +2036,7 @@ impl Bot {
     }
 }
 
-// Initialize Hikari:
+// Main function
 #[tokio::main]
 async fn main() {
     // Load environment variables
@@ -2069,7 +2073,7 @@ async fn main() {
     // Start background tasks for the store
     store.start_background_tasks().await;
 
-    // Initialize Hikari with Gemini API
+    // Initialize Hikari with Gemini API and proper configuration
     println!("Initializing Hikari with Gemini API...");
     let hikari_config = HikariConfig {
         command_prefix: "!hikari".to_string(),
@@ -2078,13 +2082,15 @@ async fn main() {
         cooldown_seconds: 300,
         memory_enabled: true,
         system_prompt: "You are Hikari, a Gen-Z crypto enthusiast and influencer...".to_string(),
+        enhanced_dm_mode: true,
+        relationship_tracking: true,
     };
         
     let mut hikari = Hikari::new(hikari_config, gemini_api_key);
 
     // Initialize Hikari
     match hikari.init().await {
-        Ok(_) => println!("Hikari initialized successfully"),
+        Ok(_) => println!("Hikari initialized successfully with DM support"),
         Err(e) => {
             println!("Error initializing Hikari with Gemini API: {:?}", e);
             println!("Check your API key and internet connection");
@@ -2096,23 +2102,26 @@ async fn main() {
     let hikari = Arc::new(RwLock::new(hikari));
 
     // Initialize scanner
-    let scanner = scanner::create_scanner();  // Create scanner instance 
+    let scanner = scanner::create_scanner();
 
-    // Build client with all required intents
-    println!("Creating Discord client...");
+    // Build client with ALL required intents including DMs
+    println!("Creating Discord client with DM support...");
     let intents = GatewayIntents::GUILDS
         | GatewayIntents::GUILD_MESSAGES
         | GatewayIntents::GUILD_MESSAGE_REACTIONS
         | GatewayIntents::GUILD_MEMBERS
-        | GatewayIntents::MESSAGE_CONTENT;
+        | GatewayIntents::MESSAGE_CONTENT
+        | GatewayIntents::DIRECT_MESSAGES
+        | GatewayIntents::DIRECT_MESSAGE_REACTIONS
+        | GatewayIntents::DIRECT_MESSAGE_TYPING;
 
     let client_builder = Client::builder(&token, intents);
 
-    // Create client with the existing Bot struct
+    // Create client with the Bot struct
     let mut client = match client_builder.event_handler(Bot { 
         store,
         hikari,
-        scanner: scanner.clone(),  // Clone here so we can use it after
+        scanner: scanner.clone(),
     }).await {
         Ok(client) => client,
         Err(e) => {
@@ -2122,7 +2131,7 @@ async fn main() {
     };
 
     // Start client
-    println!("Starting bot...");
+    println!("Starting bot with DM support enabled...");
     if let Err(why) = client.start().await {
         println!("Client error: {:?}", why);
     }
